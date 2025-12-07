@@ -36,6 +36,13 @@ try:  # pragma: no cover - optional dependency
 except ImportError:  # pragma: no cover - optional dependency
     HAS_KEYBOARD = False
 
+# Optional: pygetwindow lets us activate a specific window by title (Windows/macOS/X11).
+try:  # pragma: no cover - optional dependency
+    import pygetwindow as gw  # type: ignore
+    HAS_GW = True
+except ImportError:  # pragma: no cover - optional dependency
+    HAS_GW = False
+
 
 def _wait_with_cancel(seconds: float, stop_event: threading.Event | None) -> None:
     """Sleep for `seconds` but respond quickly to stop requests."""
@@ -54,6 +61,8 @@ def spam_key(
     duration: float,
     start_delay: float,
     hold: float,
+    target_window: str | None,
+    force_focus: bool,
     stop_event: threading.Event | None = None,
     backend: str = "pyautogui",
 ) -> int:
@@ -69,6 +78,8 @@ def spam_key(
         raise ValueError("start_delay must be >= 0")
     if hold < 0:
         raise ValueError("hold must be >= 0")
+    if target_window and not HAS_GW:
+        raise RuntimeError("pygetwindow is required for target window. Install with: python -m pip install pygetwindow")
 
     # Choose which sender to use.
     if backend == "pydirectinput":
@@ -84,6 +95,13 @@ def spam_key(
         sender_up = lambda k: pyautogui.keyUp(k)
         sender_press = lambda k: pyautogui.press(k)
 
+    target = None
+    if target_window and HAS_GW:
+        matches = gw.getWindowsWithTitle(target_window)
+        if not matches:
+            raise RuntimeError(f"No window found with title containing '{target_window}'.")
+        target = matches[0]
+
     if start_delay:
         _wait_with_cancel(start_delay, stop_event)
         if stop_event and stop_event.is_set():
@@ -98,6 +116,11 @@ def spam_key(
                 break
             if end_at is not None and time.monotonic() >= end_at:
                 break
+            if target and force_focus:
+                try:
+                    target.activate()
+                except Exception:
+                    pass
             if hold > 0:
                 sender_down(key)
                 _wait_with_cancel(hold, stop_event)
@@ -118,6 +141,8 @@ def spam_click(
     duration: float,
     start_delay: float,
     hold: float,
+    target_window: str | None,
+    force_focus: bool,
     stop_event: threading.Event | None = None,
     backend: str = "pyautogui",
 ) -> int:
@@ -130,6 +155,8 @@ def spam_click(
         raise ValueError("start_delay must be >= 0")
     if hold < 0:
         raise ValueError("hold must be >= 0")
+    if target_window and not HAS_GW:
+        raise RuntimeError("pygetwindow is required for target window. Install with: python -m pip install pygetwindow")
 
     if backend == "pydirectinput":
         if not HAS_PYDIRECT:
@@ -143,6 +170,13 @@ def spam_click(
         click_down = lambda b: pyautogui.mouseDown(button=b)
         click_up = lambda b: pyautogui.mouseUp(button=b)
         click_once = lambda b: pyautogui.click(button=b)
+
+    target = None
+    if target_window and HAS_GW:
+        matches = gw.getWindowsWithTitle(target_window)
+        if not matches:
+            raise RuntimeError(f"No window found with title containing '{target_window}'.")
+        target = matches[0]
 
     if start_delay:
         _wait_with_cancel(start_delay, stop_event)
@@ -163,6 +197,11 @@ def spam_click(
             click_up(button)
         else:
             click_once(button)
+        if target and force_focus:
+            try:
+                target.activate()
+            except Exception:
+                pass
         clicks += 1
         _wait_with_cancel(interval, stop_event)
 
@@ -182,6 +221,8 @@ class SpammerApp:
         self.duration_var = tk.StringVar(value="10")
         self.start_delay_var = tk.StringVar(value="3")
         self.hold_var = tk.StringVar(value="0")
+        self.target_window_var = tk.StringVar(value="")
+        self.force_focus_var = tk.BooleanVar(value=False)
         self.backend_var = tk.StringVar(value="pyautogui")
         self.hotkey_var = tk.StringVar(value="k")
         self.status_var = tk.StringVar(value="Idle")
@@ -236,35 +277,47 @@ class SpammerApp:
         )
         backend_box.grid(row=7, column=1, **padding)
 
-        ttk.Label(frm, text="Start/Stop hotkey (global)").grid(row=8, column=0, sticky="w", **padding)
+        ttk.Label(frm, text="Target window (pick or type)").grid(row=8, column=0, sticky="w", **padding)
+        window_row = ttk.Frame(frm)
+        window_row.grid(row=8, column=1, sticky="w", **padding)
+        self.window_combo = ttk.Combobox(window_row, width=18, values=[])
+        self.window_combo.grid(row=0, column=0, padx=(0, 6))
+        ttk.Button(window_row, text="Refresh", command=self._refresh_windows).grid(row=0, column=1)
+        ttk.Entry(frm, textvariable=self.target_window_var, width=20).grid(row=9, column=1, **padding)
+        ttk.Checkbutton(frm, text="Force focus each action", variable=self.force_focus_var).grid(
+            row=10, column=0, columnspan=2, sticky="w", **padding
+        )
+
+        ttk.Label(frm, text="Start/Stop hotkey (global)").grid(row=11, column=0, sticky="w", **padding)
         hotkey_row = ttk.Frame(frm)
-        hotkey_row.grid(row=8, column=1, sticky="w", **padding)
+        hotkey_row.grid(row=11, column=1, sticky="w", **padding)
         hotkey_entry = ttk.Entry(hotkey_row, textvariable=self.hotkey_var, width=10)
         hotkey_entry.grid(row=0, column=0, padx=(0, 6))
         ttk.Button(hotkey_row, text="Apply", command=self._register_hotkey).grid(row=0, column=1)
         if not HAS_KEYBOARD:
-            ttk.Label(frm, text="Install 'keyboard' for hotkey", foreground="red").grid(row=9, column=0, columnspan=2, sticky="w", **padding)
+            ttk.Label(frm, text="Install 'keyboard' for hotkey", foreground="red").grid(row=12, column=0, columnspan=2, sticky="w", **padding)
 
         btn_frame = ttk.Frame(frm)
-        btn_frame.grid(row=10, column=0, columnspan=2, pady=(8, 4))
+        btn_frame.grid(row=13, column=0, columnspan=2, pady=(8, 4))
         self.start_btn = ttk.Button(btn_frame, text="Start", command=self.start_spam)
         self.stop_btn = ttk.Button(btn_frame, text="Stop", command=self.stop_spam, state=tk.DISABLED)
         self.start_btn.grid(row=0, column=0, padx=6)
         self.stop_btn.grid(row=0, column=1, padx=6)
 
         # Built-in test pad: click inside, press Start, and you should see characters appear.
-        ttk.Label(frm, text="Test pad (click here, then Start)").grid(row=11, column=0, columnspan=2, sticky="w", **padding)
+        ttk.Label(frm, text="Test pad (click here, then Start)").grid(row=14, column=0, columnspan=2, sticky="w", **padding)
         self.test_pad = tk.Text(frm, width=38, height=4)
-        self.test_pad.grid(row=12, column=0, columnspan=2, **padding)
+        self.test_pad.grid(row=15, column=0, columnspan=2, **padding)
         ttk.Button(frm, text="Clear test pad", command=lambda: self.test_pad.delete("1.0", tk.END)).grid(
-            row=13, column=0, columnspan=2, pady=(0, 6)
+            row=16, column=0, columnspan=2, pady=(0, 6)
         )
 
         ttk.Label(frm, textvariable=self.status_var, foreground="blue").grid(
-            row=14, column=0, columnspan=2, sticky="w", **padding
+            row=17, column=0, columnspan=2, sticky="w", **padding
         )
 
         self._update_mode_fields()
+        self._refresh_windows()
 
     def _update_mode_fields(self) -> None:
         mode = self.mode_var.get()
@@ -274,6 +327,17 @@ class SpammerApp:
         else:
             self.key_entry.config(state=tk.DISABLED)
             self.mouse_entry.config(state=tk.NORMAL)
+
+    def _refresh_windows(self) -> None:
+        if not HAS_GW:
+            self.window_combo['values'] = []
+            if not self.target_window_var.get():
+                self.target_window_var.set("Install pygetwindow for window list")
+            return
+        titles = [t for t in gw.getAllTitles() if t.strip()]
+        self.window_combo['values'] = titles
+        if titles and not self.window_combo.get():
+            self.window_combo.set(titles[0])
 
     def _register_hotkey(self) -> None:
         # Remove previous hotkey if any
@@ -320,6 +384,8 @@ class SpammerApp:
             duration = float(self.duration_var.get())
             start_delay = float(self.start_delay_var.get())
             hold = float(self.hold_var.get())
+            target_window = self.window_combo.get().strip() or self.target_window_var.get().strip() or None
+            force_focus = bool(self.force_focus_var.get())
         except ValueError:
             messagebox.showerror("Invalid input", "Interval, duration, start delay, and hold must be numbers.")
             return
@@ -345,7 +411,7 @@ class SpammerApp:
         self._stop_event = threading.Event()
         self._thread = threading.Thread(
             target=self._run_spammer,
-            args=(mode, key, mouse_button, interval, duration, start_delay, hold, backend),
+            args=(mode, key, mouse_button, interval, duration, start_delay, hold, target_window, force_focus, backend),
             daemon=True,
         )
         self._thread.start()
@@ -366,14 +432,20 @@ class SpammerApp:
         duration: float,
         start_delay: float,
         hold: float,
+        target_window: str | None,
+        force_focus: bool,
         backend: str,
     ) -> None:
         try:
             if mode == "click":
-                presses = spam_click(mouse_button, interval, duration, start_delay, hold, self._stop_event, backend)
+                presses = spam_click(
+                    mouse_button, interval, duration, start_delay, hold, target_window, force_focus, self._stop_event, backend
+                )
                 msg = f"Finished. Sent {presses} clicks of '{mouse_button}'." if not self._stop_event.is_set() else "Stopped."
             else:
-                presses = spam_key(key, interval, duration, start_delay, hold, self._stop_event, backend)
+                presses = spam_key(
+                    key, interval, duration, start_delay, hold, target_window, force_focus, self._stop_event, backend
+                )
                 msg = f"Finished. Sent {presses} presses of '{key}'." if not self._stop_event.is_set() else "Stopped."
             self.root.after(0, self._finish_run, msg)
         except Exception as exc:  # pragma: no cover - surfaced to UI
@@ -427,6 +499,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--hold", type=float, default=0, help="Hold time in seconds (0 = tap).")
     parser.add_argument("--backend", choices=["pyautogui", "pydirectinput"], default="pyautogui", help="Input backend.")
+    parser.add_argument("--target-window", help="Substring of target window title to focus before actions.")
+    parser.add_argument("--force-focus", action="store_true", help="Activate target window before each action.")
     return parser.parse_args(argv)
 
 
@@ -441,12 +515,32 @@ def main(argv: list[str]) -> None:
         return
 
     if args.mode == "click":
-        presses = spam_click(args.button, args.interval, args.duration, args.start_delay, args.hold, None, args.backend)
+        presses = spam_click(
+            args.button,
+            args.interval,
+            args.duration,
+            args.start_delay,
+            args.hold,
+            args.target_window,
+            args.force_focus,
+            None,
+            args.backend,
+        )
         print(f"Done. Sent {presses} clicks of '{args.button}'.")
     else:
         if not args.key:
             sys.exit("--key is required in key mode. Omit arguments to open the GUI.")
-        presses = spam_key(args.key, args.interval, args.duration, args.start_delay, args.hold, None, args.backend)
+        presses = spam_key(
+            args.key,
+            args.interval,
+            args.duration,
+            args.start_delay,
+            args.hold,
+            args.target_window,
+            args.force_focus,
+            None,
+            args.backend,
+        )
         print(f"Done. Sent {presses} presses of '{args.key}'.")
 
 
